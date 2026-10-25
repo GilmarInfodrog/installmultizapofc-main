@@ -83,9 +83,9 @@ frontend_set_env() {
   sleep 2
 
   # ensure idempotency
-  backend_url=$(echo "${backend_url/https:\/\/}")
+  backend_url=$(echo "${backend_url#*://}")
   backend_url=${backend_url%%/*}
-  backend_url=https://$backend_url
+  backend_url=${url_scheme}://$backend_url
 
 sudo su - deploy << EOF
   cat <<[-]EOF > /home/deploy/${instancia_add}/frontend/.env
@@ -134,10 +134,12 @@ EOF
 
  sleep 2
   
-  sudo su - root <<EOF
-   pm2 startup
-  sudo env PATH=$PATH:/usr/bin /usr/lib/node_modules/pm2/bin/pm2 startup systemd -u deploy --hp /home/deploy
-EOF
+  # sem systemd (WSL antigo) o pm2 nao consegue iniciar sozinho com o sistema
+  if has_systemd; then
+    sudo env PATH=$PATH:/usr/bin "$(command -v pm2)" startup systemd -u deploy --hp /home/deploy
+  else
+    printf "${WHITE} 💻 Sem systemd: rode 'pm2 resurrect' (usuário deploy) após reiniciar o WSL${GRAY_LIGHT}\n"
+  fi
   sleep 2
 }
 
@@ -153,7 +155,7 @@ frontend_nginx_setup() {
 
   sleep 2
 
-  frontend_hostname=$(echo "${frontend_url/https:\/\/}")
+  frontend_hostname=$(echo "${frontend_url#*://}")
 
 sudo su - root << EOF
 
@@ -175,7 +177,7 @@ server {
 }
 END
 
-ln -s /etc/nginx/sites-available/${instancia_add}-frontend /etc/nginx/sites-enabled
+ln -sf /etc/nginx/sites-available/${instancia_add}-frontend /etc/nginx/sites-enabled
 EOF
 
   sleep 2

@@ -13,19 +13,13 @@ backend_redis_create() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  usermod -aG docker deploy
-  docker run --name redis-${instancia_add} -p ${redis_port}:6379 --restart always --detach redis redis-server --requirepass ${mysql_root_password}
-  
+  sudo usermod -aG docker deploy
+  sudo docker run --name redis-${instancia_add} -p ${redis_port}:6379 --restart always --detach redis redis-server --requirepass ${mysql_root_password}
+
   sleep 2
-  sudo su - postgres
-  createdb ${instancia_add};
-  psql
-  CREATE USER ${instancia_add} SUPERUSER INHERIT CREATEDB CREATEROLE;
-  ALTER USER ${instancia_add} PASSWORD '${mysql_root_password}';
-  \q
-  exit
-EOF
+  sudo -u postgres createdb ${instancia_add}
+  sudo -u postgres psql -c "CREATE USER ${instancia_add} SUPERUSER INHERIT CREATEDB CREATEROLE;"
+  sudo -u postgres psql -c "ALTER USER ${instancia_add} PASSWORD '${mysql_root_password}';"
 
 sleep 2
 
@@ -44,21 +38,21 @@ backend_set_env() {
   sleep 2
 
   # ensure idempotency
-  backend_url=$(echo "${backend_url/https:\/\/}")
+  backend_url=$(echo "${backend_url#*://}")
   backend_url=${backend_url%%/*}
-  backend_url=https://$backend_url
+  backend_url=${url_scheme}://$backend_url
 
   # ensure idempotency
-  frontend_url=$(echo "${frontend_url/https:\/\/}")
+  frontend_url=$(echo "${frontend_url#*://}")
   frontend_url=${frontend_url%%/*}
-  frontend_url=https://$frontend_url
+  frontend_url=${url_scheme}://$frontend_url
 
 sudo su - deploy << EOF
   cat <<[-]EOF > /home/deploy/${instancia_add}/backend/.env
 NODE_ENV=
 BACKEND_URL=${backend_url}
 FRONTEND_URL=${frontend_url}
-PROXY_PORT=443
+PROXY_PORT=${proxy_port}
 PORT=${backend_port}
 
 DB_DIALECT=postgres
@@ -230,7 +224,7 @@ backend_nginx_setup() {
 
   sleep 2
 
-  backend_hostname=$(echo "${backend_url/https:\/\/}")
+  backend_hostname=$(echo "${backend_url#*://}")
 
 sudo su - root << EOF
 cat > /etc/nginx/sites-available/${instancia_add}-backend << 'END'
@@ -249,7 +243,7 @@ server {
   }
 }
 END
-ln -s /etc/nginx/sites-available/${instancia_add}-backend /etc/nginx/sites-enabled
+ln -sf /etc/nginx/sites-available/${instancia_add}-backend /etc/nginx/sites-enabled
 EOF
 
   sleep 2

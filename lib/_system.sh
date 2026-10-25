@@ -3,6 +3,45 @@
 # system management
 
 #######################################
+# checks if systemd is running (WSL may not have it)
+# Arguments:
+#   None
+#######################################
+has_systemd() {
+  [[ -d /run/systemd/system ]]
+}
+
+#######################################
+# enables and starts a service, with or without systemd
+# Arguments:
+#   service name
+#######################################
+start_service() {
+  if has_systemd; then
+    sudo systemctl enable --now "$1"
+  else
+    sudo service "$1" start
+  fi
+}
+
+#######################################
+# installs only the apt packages that exist in this
+# Ubuntu version (names change between releases)
+# Arguments:
+#   package names
+#######################################
+apt_install_available() {
+  local available=()
+  local pkg
+  for pkg in "$@"; do
+    if apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate: [^(]"; then
+      available+=("$pkg")
+    fi
+  done
+  sudo apt-get install -y "${available[@]}"
+}
+
+#######################################
 # creates user
 # Arguments:
 #   None
@@ -14,8 +53,11 @@ system_create_user() {
 
   sleep 2
 
+  # aspas simples: o hash SHA-512 contem "$" e nao pode ser expandido
+  deploy_hash=$(openssl passwd -6 "${mysql_root_password}")
+
   sudo su - root <<EOF
-  useradd -m -p $(openssl passwd -crypt ${mysql_root_password}) -s /bin/bash -G sudo deploy
+  useradd -m -p '${deploy_hash}' -s /bin/bash -G sudo deploy
   usermod -aG sudo deploy
 EOF
 
@@ -54,10 +96,9 @@ system_update() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  apt -y update
-  sudo apt-get install -y libxshmfence-dev libgbm-dev wget unzip fontconfig locales gconf-service libasound2 libatk1.0-0 libc6 libcairo2 libcups2 libdbus-1-3 libexpat1 libfontconfig1 libgcc1 libgconf-2-4 libgdk-pixbuf2.0-0 libglib2.0-0 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 libxtst6 ca-certificates fonts-liberation libappindicator1 libnss3 lsb-release xdg-utils
-EOF
+  sudo apt-get update -y
+  sudo apt-get upgrade -y
+  sudo apt-get install -y curl wget git unzip ca-certificates gnupg lsb-release fontconfig locales
 
   sleep 2
 }
@@ -150,7 +191,7 @@ configurar_desbloqueio() {
   sleep 2
 
 sudo su - deploy <<EOF
- pm2 start ${empresa_bloquear}-backend
+ pm2 start ${empresa_desbloquear}-backend
  pm2 save
 EOF
 
@@ -186,15 +227,15 @@ sleep 2
 
   sudo su - deploy <<EOF
   cd && cd /home/deploy/${empresa_dominio}/frontend
-  sed -i "1c\REACT_APP_BACKEND_URL=https://${alter_backend_url}" .env
+  sed -i "1c\REACT_APP_BACKEND_URL=${url_scheme}://${alter_backend_url}" .env
   cd && cd /home/deploy/${empresa_dominio}/backend
-  sed -i "2c\BACKEND_URL=https://${alter_backend_url}" .env
-  sed -i "3c\FRONTEND_URL=https://${alter_frontend_url}" .env 
+  sed -i "2c\BACKEND_URL=${url_scheme}://${alter_backend_url}" .env
+  sed -i "3c\FRONTEND_URL=${url_scheme}://${alter_frontend_url}" .env
 EOF
 
 sleep 2
    
-   backend_hostname=$(echo "${alter_backend_url/https:\/\/}")
+   backend_hostname=$(echo "${alter_backend_url#*://}")
 
  sudo su - root <<EOF
   cat > /etc/nginx/sites-available/${empresa_dominio}-backend << 'END'
@@ -213,12 +254,12 @@ server {
   }
 }
 END
-ln -s /etc/nginx/sites-available/${empresa_dominio}-backend /etc/nginx/sites-enabled
+ln -sf /etc/nginx/sites-available/${empresa_dominio}-backend /etc/nginx/sites-enabled
 EOF
 
 sleep 2
 
-frontend_hostname=$(echo "${alter_frontend_url/https:\/\/}")
+frontend_hostname=$(echo "${alter_frontend_url#*://}")
 
 sudo su - root << EOF
 cat > /etc/nginx/sites-available/${empresa_dominio}-frontend << 'END'
@@ -237,7 +278,7 @@ server {
   }
 }
 END
-ln -s /etc/nginx/sites-available/${empresa_dominio}-frontend /etc/nginx/sites-enabled
+ln -sf /etc/nginx/sites-available/${empresa_dominio}-frontend /etc/nginx/sites-enabled
 EOF
 
  sleep 2
@@ -248,16 +289,16 @@ EOF
 
   sleep 2
 
-  backend_domain=$(echo "${backend_url/https:\/\/}")
-  frontend_domain=$(echo "${frontend_url/https:\/\/}")
+  if [[ "${is_wsl}" != "true" ]]; then
+    backend_domain=$(echo "${alter_backend_url#*://}")
+    frontend_domain=$(echo "${alter_frontend_url#*://}")
 
-  sudo su - root <<EOF
-  certbot -m $deploy_email \
-          --nginx \
-          --agree-tos \
-          --non-interactive \
-          --domains $backend_domain,$frontend_domain
-EOF
+    sudo certbot -m $deploy_email \
+            --nginx \
+            --agree-tos \
+            --non-interactive \
+            --domains $backend_domain,$frontend_domain
+  fi
 
   sleep 2
 
@@ -280,19 +321,17 @@ system_node_install() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  curl -fsSL https://deb.nodesource.com/setup_16.x | sudo -E bash -
-  apt-get install -y nodejs
+  curl -fsSL https://deb.nodesource.com/setup_${node_version}.x | sudo -E bash -
+  sudo apt-get install -y nodejs
   sleep 2
-  npm install -g npm@latest
+  sudo apt-get install -y postgresql
+  start_service postgresql
   sleep 2
-  sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-  wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-  sudo apt-get update -y && sudo apt-get -y install postgresql
-  sleep 2
-  sudo timedatectl set-timezone America/Sao_Paulo
-  
-EOF
+  if has_systemd; then
+    sudo timedatectl set-timezone America/Sao_Paulo
+  else
+    sudo ln -sf /usr/share/zoneinfo/America/Sao_Paulo /etc/localtime
+  fi
 
   sleep 2
 }
@@ -308,17 +347,8 @@ system_docker_install() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  apt install -y apt-transport-https \
-                 ca-certificates curl \
-                 software-properties-common
-
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
-  
-  add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable"
-
-  apt install -y docker-ce
-EOF
+  sudo apt-get install -y docker.io
+  start_service docker
 
   sleep 2
 }
@@ -341,51 +371,15 @@ system_puppeteer_dependencies() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  apt-get install -y libxshmfence-dev \
-                      libgbm-dev \
-                      wget \
-                      unzip \
-                      fontconfig \
-                      locales \
-                      gconf-service \
-                      libasound2 \
-                      libatk1.0-0 \
-                      libc6 \
-                      libcairo2 \
-                      libcups2 \
-                      libdbus-1-3 \
-                      libexpat1 \
-                      libfontconfig1 \
-                      libgcc1 \
-                      libgconf-2-4 \
-                      libgdk-pixbuf2.0-0 \
-                      libglib2.0-0 \
-                      libgtk-3-0 \
-                      libnspr4 \
-                      libpango-1.0-0 \
-                      libpangocairo-1.0-0 \
-                      libstdc++6 \
-                      libx11-6 \
-                      libx11-xcb1 \
-                      libxcb1 \
-                      libxcomposite1 \
-                      libxcursor1 \
-                      libxdamage1 \
-                      libxext6 \
-                      libxfixes3 \
-                      libxi6 \
-                      libxrandr2 \
-                      libxrender1 \
-                      libxss1 \
-                      libxtst6 \
-                      ca-certificates \
-                      fonts-liberation \
-                      libappindicator1 \
-                      libnss3 \
-                      lsb-release \
-                      xdg-utils
-EOF
+  # os nomes com "t64" sao do Ubuntu 24.04; os sem sao do 20.04/22.04
+  apt_install_available libxshmfence-dev libgbm-dev wget unzip fontconfig locales \
+                        libasound2t64 libasound2 libatk1.0-0t64 libatk1.0-0 libc6 \
+                        libcairo2 libcups2t64 libcups2 libdbus-1-3 libexpat1 libfontconfig1 \
+                        libgcc-s1 libgdk-pixbuf-2.0-0 libgdk-pixbuf2.0-0 libglib2.0-0t64 libglib2.0-0 \
+                        libgtk-3-0t64 libgtk-3-0 libnspr4 libpango-1.0-0 libpangocairo-1.0-0 \
+                        libstdc++6 libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
+                        libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 libxss1 \
+                        libxtst6 ca-certificates fonts-liberation libnss3 lsb-release xdg-utils
 
   sleep 2
 }
@@ -402,31 +396,7 @@ system_pm2_install() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  npm install -g pm2
-
-EOF
-
-  sleep 2
-}
-
-#######################################
-# installs snapd
-# Arguments:
-#   None
-#######################################
-system_snapd_install() {
-  print_banner
-  printf "${WHITE} 💻 Instalando snapd...${GRAY_LIGHT}"
-  printf "\n\n"
-
-  sleep 2
-
-  sudo su - root <<EOF
-  apt install -y snapd
-  snap install core
-  snap refresh core
-EOF
+  sudo npm install -g pm2
 
   sleep 2
 }
@@ -443,11 +413,11 @@ system_certbot_install() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  apt-get remove certbot
-  snap install --classic certbot
-  ln -s /snap/bin/certbot /usr/bin/certbot
-EOF
+  if [[ "${is_wsl}" == "true" ]]; then
+    printf "${WHITE} 💻 WSL detectado: certbot ignorado (sem domínio público)${GRAY_LIGHT}\n"
+  else
+    sudo apt-get install -y certbot python3-certbot-nginx
+  fi
 
   sleep 2
 }
@@ -464,10 +434,9 @@ system_nginx_install() {
 
   sleep 2
 
-  sudo su - root <<EOF
-  apt install -y nginx
-  rm /etc/nginx/sites-enabled/default
-EOF
+  sudo apt-get install -y nginx
+  sudo rm -f /etc/nginx/sites-enabled/default
+  start_service nginx
 
   sleep 2
 }
@@ -526,17 +495,19 @@ system_certbot_setup() {
 
   sleep 2
 
-  backend_domain=$(echo "${backend_url/https:\/\/}")
-  frontend_domain=$(echo "${frontend_url/https:\/\/}")
+  if [[ "${is_wsl}" == "true" ]]; then
+    printf "${WHITE} 💻 WSL detectado: SSL ignorado, acesse por http://${GRAY_LIGHT}\n"
+    return
+  fi
 
-  sudo su - root <<EOF
-  certbot -m $deploy_email \
+  backend_domain=$(echo "${backend_url#*://}")
+  frontend_domain=$(echo "${frontend_url#*://}")
+
+  sudo certbot -m $deploy_email \
           --nginx \
           --agree-tos \
           --non-interactive \
           --domains $backend_domain,$frontend_domain
-
-EOF
 
   sleep 2
 }
